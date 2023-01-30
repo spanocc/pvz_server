@@ -8,11 +8,16 @@ int main(int argc, char *argv[]) {
     // ThreadPool<double> tp(0, 2);
     const char* ip = DEFAULT_IP;
     int port = DEFAULT_PORT;
-    if(argc <= 2) {
+    int thread_num = 8;
+    if(argc >= 2) {
+        thread_num = atoi(argv[1]);
+    }
+    std::cout<<"Thread num: "<<thread_num<<std::endl;
+    if(argc <= 3) {
         std::cout<<"Too few arguments, use the default ip and port\n";
     } else {
-        ip = argv[1];
-        port = atoi(argv[2]);
+        ip = argv[2];
+        port = atoi(argv[3]);
         std::cout<<"ip: "<<ip<<" port: "<<port<<std::endl;
     }
 
@@ -34,7 +39,7 @@ int main(int argc, char *argv[]) {
     // 创建线程池
     ThreadPool<PVZServer> *thread_pool = nullptr;
     try {
-        thread_pool = new ThreadPool<PVZServer>(listenfd);
+        thread_pool = new ThreadPool<PVZServer>(listenfd, thread_num);
         assert(thread_pool);
         thread_pool->Run();
 

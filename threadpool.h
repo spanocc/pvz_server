@@ -3,9 +3,7 @@
 #ifndef THREADPOOL_H
 #define THREADPOOL_H
 
-#include "message.h"
-#include "socket_config.h"
-
+#include "pvz_server.h"
 
 template <typename T>
 class Thread {
@@ -13,12 +11,15 @@ class Thread {
 	Thread();
 	~Thread();
 	// 创建用户数组
-	void Init(T *users, int listenfd);
+	void Init(T *users, int listenfd, int thread_idx);
+	// 关闭一个用户连接 user_idx是该用户在users数组中的索引
+	void CloseConnection(int user_idx); 	
 	// 线程工作函数（静态函数）
     static void *ThreadWork(void *arg);
 
-	pthread_t tid_; // 线程id
+	pthread_t tid_ = -1; // 线程id
 	int pipefd_[2]; // 监听线程与线程池中的线程通信,管道是线程安全的（一个线程从一侧写，另一个线程从另一侧读）主线程是0,其余线程是1, 只注册读，不注册写
+	int thread_idx_ = -1; // 线程编号
   private:
     // 实际线程最终调用
     void ThreadRun();
@@ -34,7 +35,7 @@ class Thread {
 template <typename T>
 class ThreadPool {
   public:
-    ThreadPool(const int& listenfd, const int& thread_num = 8);
+    ThreadPool(const int& listenfd, const int& thread_num);
     ~ThreadPool();
     // 运行主线程
     void Run();
@@ -63,7 +64,7 @@ Thread<T>::Thread() {
 
     SetNoBlocking(pipefd_[0]);
     SetNoBlocking(pipefd_[1]);
-    AddEpollIn(epollfd_, pipefd_[1]);
+    AddEpollIn(epollfd_, pipefd_[1], false);
 }
 
 template <typename T>
@@ -71,12 +72,19 @@ Thread<T>::~Thread() {
 	close(pipefd_[0]);
 	close(pipefd_[1]);
 	close(epollfd_);
+
+	// 把所有连接断开
+	int user_num = user_num_;
+	for(int i = 0; i < user_num; ++i) {
+		CloseConnection(fd_table_[0]); // 删除第一个之后，后面的会顶上来
+	}
 }
 
 template <typename T>
-void Thread<T>::Init(T *users, int listenfd) {
+void Thread<T>::Init(T *users, int listenfd, int thread_idx) {
 	users_ = users;
 	listenfd_ = listenfd;
+	thread_idx_ = thread_idx;
 }
 
 template <typename T>
@@ -99,7 +107,8 @@ void Thread<T>::ThreadRun() {
 		for(int i = 0; i < event_num; ++i) {
 			int sockfd = events[i].data.fd;
 
-			if(sockfd == pipefd_[1] && (events[i].events & EPOLLIN)) {
+			if(sockfd == pipefd_[1] && (events[i].events & EPOLLIN)) {  
+				// 管道中的数据就正常读即可， 不用怕一次没读完
 				ThreadMessage message;
 				int ret = recv(sockfd, (char *)(&message), sizeof(message), 0);
 				if(ret < 0 && errno != EAGAIN) {
@@ -112,26 +121,44 @@ void Thread<T>::ThreadRun() {
 						if(connfd < 0) {
 							throw std::runtime_error("Thread: accept failure");
 						}
-						std::cout<<"connect successfully, add a user\n";
-						AddEpollIn(epollfd_, connfd);
+						AddEpollIn(epollfd_, connfd, false);
+						users_[connfd].Init(connfd, user_num_);
 						fd_table_[user_num_++] = connfd;
+						std::cout<<"thread "<<thread_idx_<<": connect successfully, add a user(socket: "<<connfd<<"), current users num = "<<user_num_<<"\n";
 					}
 				} else if(ret == 0) {
 					// 关闭管道是在析构函数中实现的
 					continue;
 				}
 			} else if(events[i].events & EPOLLIN) { // 其他可读数据，只能是用户发来的
-				char buf[65536];
-				memset(buf, 0, sizeof(buf));
-				int ret = recv(sockfd, buf, sizeof(buf) - 1, 0);
-				if(ret == 0) {
-					std::cout<<"ok\n";
-				}
-				std::cout<<buf<<std::endl;
-				// send(sockfd, buf, 100, 0);
+				if(!users_[sockfd].Read() || !users_[sockfd].ProcessRead()) {
+					// 出错，或者对方已经关闭连接,就断开这个用户的连接
+					if(user_num_ > 0 && users_[sockfd].sockfd_ != -1 && users_[sockfd].user_idx_ != -1) {
+						assert(fd_table_[users_[sockfd].user_idx_] == users_[sockfd].sockfd_);
+						CloseConnection(users_[sockfd].user_idx_);
+					}
+				} 
 			}
 		}
 	}
+}
+
+// 不能随便用const int& , 要保证原变量在执行函数时不可以改变， 传入的实参 users_[sockfd].user_idx_ 可能改变了
+template <typename T>
+void Thread<T>::CloseConnection(int user_idx) {  
+	assert(user_num_ > 0);
+	assert(user_idx >= 0 && user_idx < user_num_);
+	assert(users_[fd_table_[user_idx]].user_idx_ == user_idx);
+	int sockfd = users_[fd_table_[user_idx]].sockfd_;    
+	if(sockfd != -1) {
+		epoll_ctl(epollfd_, EPOLL_CTL_DEL, sockfd, 0);
+		close(sockfd);  
+		users_[fd_table_[user_idx]].sockfd_ = -1; 
+		users_[fd_table_[user_idx]].user_idx_ = -1;  
+		fd_table_[user_idx] = fd_table_[--user_num_]; // 把后面的顶上来
+		users_[fd_table_[user_idx]].user_idx_ = user_idx;                   
+	}
+	std::cout<<"thread "<<thread_idx_<<": close a user connection(socket: "<<sockfd<<"), current users num = "<<user_num_<<"\n";
 }
 
 
@@ -150,7 +177,7 @@ ThreadPool<T>::ThreadPool(const int& listenfd, const int& thread_num)
     assert(threads_);
 
     for(int i = 0; i < thread_num_; ++i) {
-		threads_[i].Init(users_, listenfd_);
+		threads_[i].Init(users_, listenfd_, i);
         int ret = 0;
         ret = pthread_create(&(threads_[i].tid_), NULL, threads_[i].ThreadWork, &threads_[i]);
         assert(ret == 0);
@@ -172,10 +199,10 @@ void ThreadPool<T>::Run() {
     int epollfd = epoll_create(1024);
     assert(epollfd != -1);
     SetNoBlocking(epollfd);
-    AddEpollIn(epollfd, listenfd_);
+    AddEpollIn(epollfd, listenfd_, true); // 监听套接字要设置为ET,因为事件不会马上处理，所以让他只响应一次，防止同一个连接被多个线程处理
 	// 注册从与各个线程通信的管道读的事件
 	for(int i = 0; i < thread_num_; ++i) {
-		AddEpollIn(epollfd, threads_[i].pipefd_[0]);
+		AddEpollIn(epollfd, threads_[i].pipefd_[0], false);
 	}
 
     while(1) {
@@ -194,6 +221,7 @@ void ThreadPool<T>::Run() {
 				if(ret < 0) {
 					throw std::runtime_error("ThreadPool: send failure");
 				}
+				std::cout<<"signal thread "<<current_thread_<<" to accept the connect request\n";
 				current_thread_ = (current_thread_ + 1) % thread_num_;
 			} 
 		}
@@ -201,7 +229,6 @@ void ThreadPool<T>::Run() {
 
 	close(epollfd);
 }
-
 
 
 #endif

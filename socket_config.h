@@ -26,6 +26,6 @@ constexpr int MAX_EVENT_NUM = 10000; // epoll能处理的最大事件数
 // 设置fd为非阻塞,返回旧的选项
 int SetNoBlocking(const int& fd);
 // 把fd上的可读事件注册到事件表上,设置为ET模式
-void AddEpollIn(const int& epollfd, const int& fd); 
+void AddEpollIn(const int& epollfd, const int& fd, bool set_et); 
 
 #endif
