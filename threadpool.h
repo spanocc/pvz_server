@@ -19,8 +19,11 @@ class Thread {
 	// 线程工作函数（静态函数）
     static void *ThreadWork(void *arg);
 
+	// 处理主线程传过来的信息
+    int ProcessThreadMessage(const Message& message);
+
 	pthread_t tid_ = -1; // 线程id
-	int pipefd_[2]; // 监听线程与线程池中的线程通信,管道是线程安全的（一个线程从一侧写，另一个线程从另一侧读）主线程是0,其余线程是1, 只注册读，不注册写
+	int pipefd_[2]; // 监听线程与线程池中的线程通信,管道是线程安全的（一个线程从一侧写，另一个线程从另一侧读）主线程是0,其余线程是1, 只注册读，不注册写(写是直接写)
 	int thread_idx_ = -1; // 线程编号
   private:
     // 实际线程最终调用
@@ -41,6 +44,10 @@ class ThreadPool {
     ~ThreadPool();
     // 运行主线程
     void Run();
+	// 初始化锁
+	void MutexInit();
+	// 处理子线程传过来的信息
+	int ProcessThreadMessage(const Message& message);
   private:
 
     Thread<T> *threads_ = nullptr;
@@ -49,6 +56,9 @@ class ThreadPool {
     int thread_num_ = 0; // 线程数
 	int current_thread_ = 0; // 该分配哪个线程了
     int listenfd_ = -1;
+
+	// pthread_mutex_t  mutex_graph_;
+	int graph_[LINE_NUM][COLUMN_NUM]; // 只由主线程访问，似乎不用上锁
 };
 
 // 模板类的函数定义要和声明放在同一个文件中
@@ -111,22 +121,17 @@ void Thread<T>::ThreadRun() {
 
 			if(sockfd == pipefd_[1] && (events[i].events & EPOLLIN)) {  
 				// 管道中的数据就正常读即可， 不用怕一次没读完
-				ThreadMessage message;
+				Message message;
 				int ret = recv(sockfd, (char *)(&message), sizeof(message), 0);
 				if(ret < 0 && errno != EAGAIN) {
 					throw std::runtime_error("Thread: recv failue");
 				} else if(ret > 0) {
-					if(message.message_type == CONNECT_SOCKET) { // 有新连接建立
-						struct sockaddr_in client_address;
-						socklen_t client_address_len = sizeof(client_address);
-						int connfd = accept(listenfd_, (struct sockaddr*)(&client_address), &client_address_len);
-						if(connfd < 0) {
-							throw std::runtime_error("Thread: accept failure");
-						}
-						AddEpollIn(epollfd_, connfd, false);
-						users_[connfd].Init(connfd, user_num_);
-						fd_table_[user_num_++] = connfd;
-						std::cout<<"thread "<<thread_idx_<<": connect successfully, add a user(socket: "<<connfd<<"), current users num = "<<user_num_<<"\n";
+					assert(ret == sizeof(message));
+					if(strcmp(message.magic, magic_str)) {
+						throw std::runtime_error("Thread: magic failure");
+					}
+					if(!ProcessThreadMessage(message)) {
+						return; // 失败就结束（也可以不结束，我的有点极端，防止出错误）
 					}
 				} else if(ret == 0) {
 					// 关闭管道是在析构函数中实现的
@@ -163,6 +168,35 @@ void Thread<T>::CloseConnection(int user_idx) {
 	std::cout<<"thread "<<thread_idx_<<": close a user connection(socket: "<<sockfd<<"), current users num = "<<user_num_<<"\n";
 }
 
+template<typename T>
+int Thread<T>::ProcessThreadMessage(const Message& message) {
+
+	if(message.message_type == CONNECT_SOCKET) { // 有新连接建立
+		struct sockaddr_in client_address;
+		socklen_t client_address_len = sizeof(client_address);
+		int connfd = accept(listenfd_, (struct sockaddr*)(&client_address), &client_address_len);
+		if(connfd < 0) {
+			throw std::runtime_error("Thread: accept failure");
+		}
+		AddEpollIn(epollfd_, connfd, false);
+		users_[connfd].Init(connfd, user_num_, pipefd_);
+		fd_table_[user_num_++] = connfd;
+		std::cout<<"thread "<<thread_idx_<<": connect successfully, add a user(socket: "<<connfd<<"), current users num = "<<user_num_<<"\n";
+	} else if(message.message_type == RESPOND_CREATE_PLANT){
+		// 收到回应放置植物的信息，就给本线程的所有客户发送一个报文
+		for(int i = 0; i < user_num_; ++i) {
+			if(!users_[fd_table_[i]].ProcessWrite(message)) {
+				throw std::runtime_error("Thread: prosess write failure");
+			}
+		}
+	} 
+
+	return true;
+}
+
+
+
+// 线程池
 
 template <typename T>
 ThreadPool<T>::ThreadPool(const int& listenfd, const int& thread_num) 
@@ -186,12 +220,25 @@ ThreadPool<T>::ThreadPool(const int& listenfd, const int& thread_num)
         ret = pthread_detach(threads_[i].tid_);
         assert(ret == 0);
     }
+
+	for(int i = 0; i < LINE_NUM; ++i) {
+		for(int j= 0; j < COLUMN_NUM; ++j) {
+			graph_[i][j] = 0; // 初始化地图为空
+		}
+	}
+	MutexInit();
 }
 
 template <typename T>
 ThreadPool<T>::~ThreadPool() {
+	//pthread_mutex_destroy(&mutex_graph_);
     delete [] threads_;
 	delete [] users_;
+}
+
+template <typename T>
+void ThreadPool<T>::MutexInit() {
+	// pthread_mutex_init(&mutex_graph_, NULL);
 }
 
 template <typename T>
@@ -217,7 +264,8 @@ void ThreadPool<T>::Run() {
 
 			if(sockfd == listenfd_) { // 有新的连接请求
 				std::cout<<"receive a connect request\n";
-				ThreadMessage message;
+				Message message;
+				strncpy(message.magic, magic_str, sizeof(message.magic) - 1);
 				message.message_type = CONNECT_SOCKET;
 				int ret = send(threads_[current_thread_].pipefd_[0], (char *)(&message), sizeof(message), 0);
 				if(ret != sizeof(message)) {
@@ -225,11 +273,48 @@ void ThreadPool<T>::Run() {
 				}
 				std::cout<<"signal thread "<<current_thread_<<" to accept the connect request\n";
 				current_thread_ = (current_thread_ + 1) % thread_num_;
-			} 
+			} else if(events[i].events & EPOLLIN){
+				// 否则就是从子线程发送过来的信息
+				Message message;
+				int ret = recv(sockfd, &message, sizeof(message), 0);
+				assert(ret == sizeof(message));
+				if(strcmp(message.magic, magic_str)) {
+					throw std::runtime_error("Thread: magic failure");
+				}
+				if(!ProcessThreadMessage(message)) {
+					break;
+				}
+			}
 		}
     }
 
 	close(epollfd);
+}
+
+
+template <typename T>
+int ThreadPool<T>::ProcessThreadMessage(const Message& message) {  
+	if(message.message_type == SIGNAL_CREATE_PLANT) {
+		// pthread_mutex_lock(&mutex_graph_);
+		int line = message.line, column = message.column;
+		if(line >= 0 && line < LINE_NUM && column >= 0 && column < COLUMN_NUM) {
+			if(graph_[line][column] == 0) {
+				graph_[line][column] = 1;
+				Message new_message = message;
+				new_message.message_type = RESPOND_CREATE_PLANT; 
+				for(int i = 0; i < thread_num_; ++i) {
+					int ret = send(threads_[i].pipefd_[0], &new_message, sizeof(new_message), 0);
+					assert(ret == sizeof(new_message));
+				}
+				std::cout<<"create a "<<plant_name[new_message.plant_type]<<" at ("<<new_message.line<<", "<<new_message.column<<")\n";
+			}
+		}
+		// pthread_mutex_unlock(&mutex_graph_);
+	} else {
+
+	}
+
+	return true;
 }
 
 

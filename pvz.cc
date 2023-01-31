@@ -1,3 +1,5 @@
+#include "pvz.h"
+
 const char *plant_name[] = {
 /* 0  */ "",
 /* 1  */ "sunflower",
