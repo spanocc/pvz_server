@@ -5,6 +5,8 @@
 
 #include "pvz_server.h"
 
+// 专门用一个线程负责定时任务？， 或者就让主线程负责定时任务，反正主线程也要向所有用户发信息，统一事件源，把定时任务通过sig_pipe发给处理定时任务的线程
+
 template <typename T>
 class Thread {
   public:
@@ -218,7 +220,7 @@ void ThreadPool<T>::Run() {
 				ThreadMessage message;
 				message.message_type = CONNECT_SOCKET;
 				int ret = send(threads_[current_thread_].pipefd_[0], (char *)(&message), sizeof(message), 0);
-				if(ret < 0) {
+				if(ret != sizeof(message)) {
 					throw std::runtime_error("ThreadPool: send failure");
 				}
 				std::cout<<"signal thread "<<current_thread_<<" to accept the connect request\n";

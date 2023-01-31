@@ -1,5 +1,7 @@
 #include "pvz_server.h"
 
+extern const char *plant_name[];
+
 PVZServer::~PVZServer() {
     
 }
@@ -39,14 +41,16 @@ int PVZServer::ProcessRead() {
         return true; // 不够，继续读
     } else {
         // std::cout<<read_message_.magic<<std::endl;
-        Write();
+        // Write();
+        if(read_message_.message_type == CREATE_PLANT) {
+            std::cout<<"create a "<<plant_name[read_message_.plant_type]<<" at ("<<read_message_.line<<", "<<read_message_.column<<")\n";
+        }
+
         Reset();
     }
     return true;
 }
 
-// 经过证明，在槽函数执行过程中，不会被其他信号打断
-// 一次发就全发完
 int PVZServer::Write() {
     strcpy(write_message_.magic, "yuriyuri");
     assert(write_message_offset_ == 0);

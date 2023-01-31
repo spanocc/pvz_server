@@ -20,6 +20,8 @@ int main(int argc, char *argv[]) {
         port = atoi(argv[3]);
         std::cout<<"ip: "<<ip<<" port: "<<port<<std::endl;
     }
+    std::cout<<std::endl;
+    
 
     int listenfd = socket(PF_INET, SOCK_STREAM, 0);
     assert(listenfd >= 0);

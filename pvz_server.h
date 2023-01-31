@@ -13,6 +13,7 @@
 
 #include "message.h"
 #include "socket_config.h"
+#include "plant.h"
 
 // 由线程负责关闭连接
 
