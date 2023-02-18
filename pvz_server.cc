@@ -46,6 +46,10 @@ int PVZServer::ProcessRead() {
         read_message_.sockfd = sockfd_; // 把sockfd传过去，方便区分是不是回应报文
         int ret = send(pipefd_, (char *)(&read_message_), sizeof(read_message_), 0);
         assert(ret == sizeof(read_message_));
+    } else if(read_message_.message_type == SIGNAL_DESTROY_PLANT) {
+        read_message_.sockfd = sockfd_;
+        int ret = send(pipefd_, (char *)(&read_message_), sizeof(read_message_), 0);
+        assert(ret == sizeof(read_message_));
     }
 
     Reset();

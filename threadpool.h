@@ -58,7 +58,12 @@ class ThreadPool {
     int listenfd_ = -1;
 
 	// pthread_mutex_t  mutex_graph_;
-	int graph_[LINE_NUM][COLUMN_NUM]; // 只由主线程访问，似乎不用上锁
+	// 只由主线程访问，似乎不用上锁
+	// 数组元素的值是地图上植物的int值， -1表示无植物
+	int graph_[LINE_NUM][COLUMN_NUM]; 
+	// 给每个创建的植物都排上序号，并且销毁植物的操作也要表示销毁哪个序号的植物，放置发生时间在前的销毁操作把创建时间之后的植物给清除掉
+	// 同时当僵尸把植物销毁掉时，每个client都会向服务器发送报文，序号可以防止服务端对同一个销毁操作执行多次
+	int plant_seq_[LINE_NUM][COLUMN_NUM]; // 表示该位置上当前植物（如果有）的序号
 };
 
 // 模板类的函数定义要和声明放在同一个文件中
@@ -189,13 +194,19 @@ int Thread<T>::ProcessThreadMessage(const Message& message) {
 				throw std::runtime_error("Thread: prosess write failure");
 			}
 		}
-	} 
+	} else if(message.message_type == RESPOND_DESTROY_PLANT) {
+		for(int i = 0; i < user_num_; ++i) {
+			if(!users_[fd_table_[i]].ProcessWrite(message)) {
+				throw std::runtime_error("Thread: prosess write failure");
+			}
+		}
+	}
 
 	return true;
 }
 
 
-
+// ------------------------------------------------------------------------------------------------------------------------------------------------------
 // 线程池
 
 template <typename T>
@@ -223,7 +234,8 @@ ThreadPool<T>::ThreadPool(const int& listenfd, const int& thread_num)
 
 	for(int i = 0; i < LINE_NUM; ++i) {
 		for(int j= 0; j < COLUMN_NUM; ++j) {
-			graph_[i][j] = 0; // 初始化地图为空
+			graph_[i][j] = -1; // 初始化地图为空
+			plant_seq_[i][j] = 0;
 		}
 	}
 	MutexInit();
@@ -298,10 +310,11 @@ int ThreadPool<T>::ProcessThreadMessage(const Message& message) {
 		// pthread_mutex_lock(&mutex_graph_);
 		int line = message.line, column = message.column;
 		if(line >= 0 && line < LINE_NUM && column >= 0 && column < COLUMN_NUM) {
-			if(graph_[line][column] == 0) {
-				graph_[line][column] = 1;
+			if(graph_[line][column] == -1) {
+				graph_[line][column] = message.plant_type;
 				Message new_message = message;
 				new_message.message_type = RESPOND_CREATE_PLANT; 
+				new_message.seq = ++ plant_seq_[line][column]; // 序号+1
 				for(int i = 0; i < thread_num_; ++i) {
 					int ret = send(threads_[i].pipefd_[0], &new_message, sizeof(new_message), 0);
 					assert(ret == sizeof(new_message));
@@ -310,6 +323,21 @@ int ThreadPool<T>::ProcessThreadMessage(const Message& message) {
 			}
 		}
 		// pthread_mutex_unlock(&mutex_graph_);
+	} else if(message.message_type == SIGNAL_DESTROY_PLANT) {
+		int line = message.line, column = message.column;
+		if(line >= 0 && line < LINE_NUM && column >= 0 && column < COLUMN_NUM) {
+			if(graph_[line][column] != -1 && message.seq == plant_seq_[line][column]) { // 有植物并且序号一致才能删除
+				Message new_message = message;
+				new_message.message_type = RESPOND_DESTROY_PLANT; 
+				new_message.plant_type = graph_[line][column];
+				graph_[line][column] = -1;
+				for(int i = 0; i < thread_num_; ++i) {
+					int ret = send(threads_[i].pipefd_[0], &new_message, sizeof(new_message), 0);
+					assert(ret == sizeof(new_message));
+				}
+				std::cout<<"destroy a "<<plant_name[new_message.plant_type]<<" at ("<<new_message.line<<", "<<new_message.column<<")\n";
+			}
+		}
 	} else {
 
 	}

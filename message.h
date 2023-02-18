@@ -8,7 +8,8 @@ enum MessageType {
     CLOSE_CONNECTION,
 
     
-    SIGNAL_CREATE_PLANT, RESPOND_CREATE_PLANT // 放置一个植物的事件，（点击graphblock块） 
+    SIGNAL_CREATE_PLANT, RESPOND_CREATE_PLANT, // 放置一个植物的事件，（点击graphblock块）
+    SIGNAL_DESTROY_PLANT, RESPOND_DESTROY_PLANT, 
 
 };
 
@@ -19,6 +20,7 @@ struct Message {
     int line, column; // 事件发生的行，列
     int plant_type;
     int sockfd; // 发送者的sockfd,用于区分，方便设置回应字段
+    int seq; // 所要销毁（或者创建）的植物的序号
     bool respond; // 是不是事件发生的回应报文
 };
 
