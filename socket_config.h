@@ -28,4 +28,9 @@ int SetNoBlocking(const int& fd);
 // 把fd上的可读事件注册到事件表上,设置为ET模式
 void AddEpollIn(const int& epollfd, const int& fd, bool set_et); 
 
+// 信号处理函数
+void SigHandler(int sig);
+// 设置信号处理函数
+void SetSig(int sig);
+
 #endif

@@ -4,6 +4,8 @@
 #define THREADPOOL_H
 
 #include "pvz_server.h"
+#include "zombie_timer.h"
+#include <list>
 
 // 专门用一个线程负责定时任务？， 或者就让主线程负责定时任务，反正主线程也要向所有用户发信息，统一事件源，把定时任务通过sig_pipe发给处理定时任务的线程
 
@@ -40,7 +42,7 @@ class Thread {
 template <typename T>
 class ThreadPool {
   public:
-    ThreadPool(const int& listenfd, const int& thread_num);
+    ThreadPool(const int& listenfd, const int& thread_num, int sig_pipefd[2]);
     ~ThreadPool();
     // 运行主线程
     void Run();
@@ -48,7 +50,22 @@ class ThreadPool {
 	void MutexInit();
 	// 处理子线程传过来的信息
 	int ProcessThreadMessage(const Message& message);
+
+	// 僵尸定时器初始化
+	void ZombieTimerInit();
+	// 启动定时器
+	void TimerStart();
+	// 定时器tick
+	void TimerTick(); 
+	// 定时器的回调函数，产生僵尸
+	void CreateZombie(ZombieTimer* zombie_timer);
+	// 产生阳光
+	void ProduceSun();
+	// 统一事件源
+	int sig_pipefd_[2];
+
   private:
+	static constexpr int TIMESLOT = 1; // 每一秒触发一次alarm信号
 
     Thread<T> *threads_ = nullptr;
 	T *users_ = nullptr; // 以连接socket的值作为索引
@@ -64,6 +81,13 @@ class ThreadPool {
 	// 给每个创建的植物都排上序号，并且销毁植物的操作也要表示销毁哪个序号的植物，放置发生时间在前的销毁操作把创建时间之后的植物给清除掉
 	// 同时当僵尸把植物销毁掉时，每个client都会向服务器发送报文，序号可以防止服务端对同一个销毁操作执行多次
 	int plant_seq_[LINE_NUM][COLUMN_NUM]; // 表示该位置上当前植物（如果有）的序号
+
+	std::list<ZombieTimer*> zombie_timer_list_;
+	time_t initial_timer_ = 0;
+	
+	int produce_sun_time = 0;
+	std::default_random_engine sun_e;
+	std::uniform_int_distribution<int> sun_u;
 };
 
 // 模板类的函数定义要和声明放在同一个文件中
@@ -200,6 +224,18 @@ int Thread<T>::ProcessThreadMessage(const Message& message) {
 				throw std::runtime_error("Thread: prosess write failure");
 			}
 		}
+	} else if(message.message_type == CREATE_ZOMBIE) {
+		for(int i = 0; i < user_num_; ++i) {
+			if(!users_[fd_table_[i]].ProcessWrite(message)) {
+				throw std::runtime_error("Thread: prosess write failure");
+			}
+		}
+	} else if(message.message_type == PRODUCE_SUN) {
+		for(int i = 0; i < user_num_; ++i) {
+			if(!users_[fd_table_[i]].ProcessWrite(message)) {
+				throw std::runtime_error("Thread: prosess write failure");
+			}
+		}
 	}
 
 	return true;
@@ -210,14 +246,20 @@ int Thread<T>::ProcessThreadMessage(const Message& message) {
 // 线程池
 
 template <typename T>
-ThreadPool<T>::ThreadPool(const int& listenfd, const int& thread_num) 
+ThreadPool<T>::ThreadPool(const int& listenfd, const int& thread_num, int sig_pipefd[2]) 
     : thread_num_(thread_num),
-      listenfd_(listenfd) {
+      listenfd_(listenfd),
+	  sun_e(time(0)),
+	  sun_u(0, 1500) {
 
     assert(thread_num_ > 0 && thread_num_ <= MAX_THREAD_NUM);
     if(thread_num_ <= 0 || thread_num_ > MAX_THREAD_NUM) {
 		throw std::invalid_argument("ThreadPool: acquire the invalid argument(thread_num)");
     }
+
+	sig_pipefd_[0] = sig_pipefd[0];
+	sig_pipefd_[1] = sig_pipefd[1];
+
 	users_ = new T [MAX_USER_NUM];
 	assert(users_);
     threads_ = new Thread<T> [thread_num_];
@@ -239,6 +281,8 @@ ThreadPool<T>::ThreadPool(const int& listenfd, const int& thread_num)
 		}
 	}
 	MutexInit();
+
+	ZombieTimerInit();
 }
 
 template <typename T>
@@ -266,6 +310,9 @@ void ThreadPool<T>::Run() {
 		AddEpollIn(epollfd, threads_[i].pipefd_[0], false);
 	}
 
+	// 注册信号读事件
+	AddEpollIn(epollfd, sig_pipefd_[0], false);
+
     while(1) {
         int event_num = epoll_wait(epollfd, events, MAX_EVENT_NUM, -1);
 		if(event_num < 0 && errno != EINTR) { // EINTR是信号把epoll_wait系统调用中断了
@@ -285,13 +332,26 @@ void ThreadPool<T>::Run() {
 				}
 				std::cout<<"signal thread "<<current_thread_<<" to accept the connect request\n";
 				current_thread_ = (current_thread_ + 1) % thread_num_;
-			} else if(events[i].events & EPOLLIN){
-				// 否则就是从子线程发送过来的信息
+
+				if(!initial_timer_) { // 有用户连接，启动僵尸定时器
+					TimerStart();
+				}
+
+			} else if(sockfd == sig_pipefd_[0] && (events[i].events & EPOLLIN)) { // 定时事件
 				Message message;
 				int ret = recv(sockfd, &message, sizeof(message), 0);
 				assert(ret == sizeof(message));
 				if(strcmp(message.magic, magic_str)) {
-					throw std::runtime_error("Thread: magic failure");
+					throw std::runtime_error("ThreadPool: magic failure");
+				}
+				TimerTick();
+				alarm(TIMESLOT);
+			} else if(events[i].events & EPOLLIN){ 	// 否则就是从子线程发送过来的信息
+				Message message;
+				int ret = recv(sockfd, &message, sizeof(message), 0);
+				assert(ret == sizeof(message));
+				if(strcmp(message.magic, magic_str)) {
+					throw std::runtime_error("ThreadPool: magic failure");
 				}
 				if(!ProcessThreadMessage(message)) {
 					break;
@@ -343,6 +403,94 @@ int ThreadPool<T>::ProcessThreadMessage(const Message& message) {
 	}
 
 	return true;
+}
+
+
+template <typename T>
+void ThreadPool<T>::ZombieTimerInit() {
+	std::default_random_engine zombie_e(time(0));
+	std::uniform_int_distribution<int> zombie_u(0, 4);
+
+	zombie_timer_list_.push_back(new ZombieTimer{20, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{50, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{80, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{95, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{113, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{130, ORDINARY, zombie_u(zombie_e)}); 
+
+	zombie_timer_list_.push_back(new ZombieTimer{160, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{160, ORDINARY, zombie_u(zombie_e)});
+
+	zombie_timer_list_.push_back(new ZombieTimer{173, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{173, ORDINARY, zombie_u(zombie_e)});
+
+	zombie_timer_list_.push_back(new ZombieTimer{186, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{186, ORDINARY, zombie_u(zombie_e)});
+
+	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
+}
+
+template <typename T>
+void ThreadPool<T>::TimerStart() {
+	initial_timer_ = time(NULL);
+	alarm(TIMESLOT); 
+}
+
+
+template <typename T>
+void ThreadPool<T>::TimerTick() {
+	time_t current_time = time(NULL);
+	while(!zombie_timer_list_.empty()) {
+		if(current_time - initial_timer_ < zombie_timer_list_.front()->timeout) {
+			break;
+		}
+		ZombieTimer *zombie_timer = zombie_timer_list_.front();
+		zombie_timer_list_.pop_front();
+		CreateZombie(zombie_timer);
+		delete zombie_timer;
+	}
+
+	// 每10s产生一个阳光
+	if((++produce_sun_time) == 10) {
+		produce_sun_time = 0;
+		ProduceSun();
+	}
+}
+
+template <typename T>
+void ThreadPool<T>::CreateZombie(ZombieTimer* zombie_timer) {
+	Message message;
+	message.message_type = CREATE_ZOMBIE;
+	message.line = zombie_timer->line;
+	message.zombie_type = zombie_timer->zombie_type;
+	strncpy(message.magic, magic_str, sizeof(message.magic) - 1);
+
+	for(int i = 0; i < thread_num_; ++i) {
+		int ret = send(threads_[i].pipefd_[0], &message, sizeof(message), 0);
+		assert(ret == sizeof(message));
+	}
+	std::cout<<"create a zombie in line "<<message.line<<"\n";
+}
+
+template <typename T>
+void ThreadPool<T>::ProduceSun() {
+	Message message;
+	message.message_type = PRODUCE_SUN;
+	message.x = sun_u(sun_e);
+	strncpy(message.magic, magic_str, sizeof(message.magic) - 1);
+
+	for(int i = 0; i < thread_num_; ++i) {
+		int ret = send(threads_[i].pipefd_[0], &message, sizeof(message), 0);
+		assert(ret == sizeof(message));
+	}
+	std::cout<<"produce a sun in x: "<<message.x<<"\n";
 }
 
 

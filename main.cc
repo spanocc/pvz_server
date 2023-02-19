@@ -4,6 +4,8 @@
 const char *DEFAULT_IP = "192.168.48.130";  // arch ip地址
 const int DEFAULT_PORT = 2200;
 
+int sig_pipefd[2]; // 往1写，从0读
+
 int main(int argc, char *argv[]) {
     // ThreadPool<double> tp(0, 2);
     const char* ip = DEFAULT_IP;
@@ -38,10 +40,15 @@ int main(int argc, char *argv[]) {
     ret = listen(listenfd, 1024);
     assert(ret != -1);
 
+    ret = socketpair(PF_UNIX, SOCK_STREAM, 0, sig_pipefd);
+    SetNoBlocking(sig_pipefd[0]);
+    SetNoBlocking(sig_pipefd[1]);
+    SetSig(SIGALRM);
+
     // 创建线程池
     ThreadPool<PVZServer> *thread_pool = nullptr;
     try {
-        thread_pool = new ThreadPool<PVZServer>(listenfd, thread_num);
+        thread_pool = new ThreadPool<PVZServer>(listenfd, thread_num, sig_pipefd);
         assert(thread_pool);
         thread_pool->Run();
 
@@ -50,5 +57,7 @@ int main(int argc, char *argv[]) {
     }    
     delete thread_pool;
     close(listenfd);
+    close(sig_pipefd[0]);
+    close(sig_pipefd[1]);
     return 0;
 }
