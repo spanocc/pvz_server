@@ -63,6 +63,8 @@ class ThreadPool {
 	void ProduceSun();
 	// 开始游戏
 	void GameStart();
+	// 告诉客户端已经没有僵尸产生了
+	void ZombieEnd();
 	// 统一事件源
 	int sig_pipefd_[2];
 
@@ -88,13 +90,15 @@ class ThreadPool {
 	std::list<ZombieTimer*> zombie_timer_list_;
 	time_t initial_timer_ = 0;
 	
-	int produce_sun_time = 0;
-	std::default_random_engine sun_e;
-	std::uniform_int_distribution<int> sun_u;
+	int produce_sun_time_ = 0;
+	std::default_random_engine sun_e_;
+	std::uniform_int_distribution<int> sun_u_;
 
-	int game_start_time = 0;
+	int game_start_time_ = 0;
 	
-	bool game_run = 0;
+	bool game_run_ = 0;
+
+	bool last_wave_ = 0;
 };
 
 // 模板类的函数定义要和声明放在同一个文件中
@@ -249,6 +253,12 @@ int Thread<T>::ProcessThreadMessage(const Message& message) {
 				throw std::runtime_error("Thread: prosess write failure");
 			}
 		}
+	} else if(message.message_type == LAST_WAVE) {
+		for(int i = 0; i < user_num_; ++i) {
+			if(!users_[fd_table_[i]].ProcessWrite(message)) {
+				throw std::runtime_error("Thread: prosess write failure");
+			}
+		}
 	}
 
 	return true;
@@ -262,8 +272,8 @@ template <typename T>
 ThreadPool<T>::ThreadPool(const int& listenfd, const int& thread_num, int sig_pipefd[2]) 
     : thread_num_(thread_num),
       listenfd_(listenfd),
-	  sun_e(time(0)),
-	  sun_u(0, 1500) {
+	  sun_e_(time(0)),
+	  sun_u_(0, 1500) {
 
     assert(thread_num_ > 0 && thread_num_ <= MAX_THREAD_NUM);
     if(thread_num_ <= 0 || thread_num_ > MAX_THREAD_NUM) {
@@ -411,6 +421,10 @@ int ThreadPool<T>::ProcessThreadMessage(const Message& message) {
 				std::cout<<"destroy a "<<plant_name[new_message.plant_type]<<" at ("<<new_message.line<<", "<<new_message.column<<")\n";
 			}
 		}
+	} else if(message.message_type == VICTORY || message.message_type == DEFEAT) {
+		 game_run_ = 0;
+		 if(message.message_type == VICTORY) std::cout<<"victory!\n";
+		 else std::cout<<"defeat!\n";
 	} else {
 
 	}
@@ -429,25 +443,33 @@ void ThreadPool<T>::ZombieTimerInit() {
 	zombie_timer_list_.push_back(new ZombieTimer{80, ORDINARY, zombie_u(zombie_e)});
 	zombie_timer_list_.push_back(new ZombieTimer{95, ORDINARY, zombie_u(zombie_e)});
 	zombie_timer_list_.push_back(new ZombieTimer{113, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{115, ORDINARY, zombie_u(zombie_e)});
 	zombie_timer_list_.push_back(new ZombieTimer{130, ORDINARY, zombie_u(zombie_e)}); 
 
 	zombie_timer_list_.push_back(new ZombieTimer{160, ORDINARY, zombie_u(zombie_e)});
-	zombie_timer_list_.push_back(new ZombieTimer{160, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{161, ORDINARY, zombie_u(zombie_e)});
 
 	zombie_timer_list_.push_back(new ZombieTimer{173, ORDINARY, zombie_u(zombie_e)});
-	zombie_timer_list_.push_back(new ZombieTimer{173, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{178, ORDINARY, zombie_u(zombie_e)});
+
+	zombie_timer_list_.push_back(new ZombieTimer{180, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{183, ORDINARY, zombie_u(zombie_e)});
 
 	zombie_timer_list_.push_back(new ZombieTimer{186, ORDINARY, zombie_u(zombie_e)});
-	zombie_timer_list_.push_back(new ZombieTimer{186, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{188, ORDINARY, zombie_u(zombie_e)});
 
 	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
-	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
-	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
-	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
-	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
-	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
-	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
-	zombie_timer_list_.push_back(new ZombieTimer{215, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{217, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{217, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{218, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{218, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{219, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{219, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{219, ORDINARY, zombie_u(zombie_e)});
+
+	zombie_timer_list_.push_back(new ZombieTimer{220, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{220, ORDINARY, zombie_u(zombie_e)});
+	zombie_timer_list_.push_back(new ZombieTimer{220, ORDINARY, zombie_u(zombie_e)});
 }
 
 template <typename T>
@@ -461,15 +483,15 @@ template <typename T>
 void ThreadPool<T>::TimerTick() {
 
 	// 10s后一起开始
-	if(game_start_time < GAME_START_TIME) {
-		++game_start_time;
-		if(game_start_time == GAME_START_TIME) {
-			game_run = 1;
+	if(game_start_time_ < GAME_START_TIME) {
+		++game_start_time_;
+		if(game_start_time_ == GAME_START_TIME) {
+			game_run_ = 1;
 			GameStart();
 			return;
 		}
 	}
-	if(!game_run) return;
+	if(!game_run_) return;
 
 	assert(initial_timer_);
 
@@ -484,9 +506,14 @@ void ThreadPool<T>::TimerTick() {
 		delete zombie_timer;
 	}
 
+	if(!last_wave_ && zombie_timer_list_.empty()) {
+		last_wave_ = 1;
+		ZombieEnd();
+	}
+
 	// 每10s产生一个阳光
-	if((++produce_sun_time) == 10) {
-		produce_sun_time = 0;
+	if((++produce_sun_time_) == 10) {
+		produce_sun_time_ = 0;
 		ProduceSun();
 	}
 
@@ -511,7 +538,7 @@ template <typename T>
 void ThreadPool<T>::ProduceSun() {
 	Message message;
 	message.message_type = PRODUCE_SUN;
-	message.x = sun_u(sun_e);
+	message.x = sun_u_(sun_e_);
 	strncpy(message.magic, magic_str, sizeof(message.magic) - 1);
 
 	for(int i = 0; i < thread_num_; ++i) {
@@ -534,6 +561,18 @@ void ThreadPool<T>::GameStart() {
 	initial_timer_ = time(NULL);
 
 	std::cout<<"game start!\n";
+}
+
+template <typename T>
+void ThreadPool<T>::ZombieEnd() {
+	Message message;
+	message.message_type = LAST_WAVE;
+	strncpy(message.magic, magic_str, sizeof(message.magic) - 1);
+	for(int i = 0; i < thread_num_; ++i) {
+		int ret = send(threads_[i].pipefd_[0], &message, sizeof(message), 0);
+		assert(ret == sizeof(message));
+	}
+	std::cout<<"last wave\n";
 }
 
 

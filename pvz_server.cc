@@ -50,6 +50,10 @@ int PVZServer::ProcessRead() {
         read_message_.sockfd = sockfd_;
         int ret = send(pipefd_, (char *)(&read_message_), sizeof(read_message_), 0);
         assert(ret == sizeof(read_message_));
+    } else if(read_message_.message_type == VICTORY || read_message_.message_type == DEFEAT) {
+        read_message_.sockfd = sockfd_;
+        int ret = send(pipefd_, (char *)(&read_message_), sizeof(read_message_), 0);
+        assert(ret == sizeof(read_message_));
     }
 
     Reset();
