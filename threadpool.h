@@ -61,11 +61,14 @@ class ThreadPool {
 	void CreateZombie(ZombieTimer* zombie_timer);
 	// 产生阳光
 	void ProduceSun();
+	// 开始游戏
+	void GameStart();
 	// 统一事件源
 	int sig_pipefd_[2];
 
   private:
 	static constexpr int TIMESLOT = 1; // 每一秒触发一次alarm信号
+	static constexpr int GAME_START_TIME = 10; // 10s后开始游戏
 
     Thread<T> *threads_ = nullptr;
 	T *users_ = nullptr; // 以连接socket的值作为索引
@@ -88,6 +91,10 @@ class ThreadPool {
 	int produce_sun_time = 0;
 	std::default_random_engine sun_e;
 	std::uniform_int_distribution<int> sun_u;
+
+	int game_start_time = 0;
+	
+	bool game_run = 0;
 };
 
 // 模板类的函数定义要和声明放在同一个文件中
@@ -231,6 +238,12 @@ int Thread<T>::ProcessThreadMessage(const Message& message) {
 			}
 		}
 	} else if(message.message_type == PRODUCE_SUN) {
+		for(int i = 0; i < user_num_; ++i) {
+			if(!users_[fd_table_[i]].ProcessWrite(message)) {
+				throw std::runtime_error("Thread: prosess write failure");
+			}
+		}
+	} else if(message.message_type == GAME_START) {
 		for(int i = 0; i < user_num_; ++i) {
 			if(!users_[fd_table_[i]].ProcessWrite(message)) {
 				throw std::runtime_error("Thread: prosess write failure");
@@ -439,13 +452,27 @@ void ThreadPool<T>::ZombieTimerInit() {
 
 template <typename T>
 void ThreadPool<T>::TimerStart() {
-	initial_timer_ = time(NULL);
+	// initial_timer_ = time(NULL);
 	alarm(TIMESLOT); 
 }
 
 
 template <typename T>
 void ThreadPool<T>::TimerTick() {
+
+	// 10s后一起开始
+	if(game_start_time < GAME_START_TIME) {
+		++game_start_time;
+		if(game_start_time == GAME_START_TIME) {
+			game_run = 1;
+			GameStart();
+			return;
+		}
+	}
+	if(!game_run) return;
+
+	assert(initial_timer_);
+
 	time_t current_time = time(NULL);
 	while(!zombie_timer_list_.empty()) {
 		if(current_time - initial_timer_ < zombie_timer_list_.front()->timeout) {
@@ -462,6 +489,7 @@ void ThreadPool<T>::TimerTick() {
 		produce_sun_time = 0;
 		ProduceSun();
 	}
+
 }
 
 template <typename T>
@@ -491,6 +519,21 @@ void ThreadPool<T>::ProduceSun() {
 		assert(ret == sizeof(message));
 	}
 	std::cout<<"produce a sun in x: "<<message.x<<"\n";
+}
+
+template <typename T>
+void ThreadPool<T>::GameStart() {
+	Message message;
+	message.message_type = GAME_START;
+	strncpy(message.magic, magic_str, sizeof(message.magic) - 1);
+	for(int i = 0; i < thread_num_; ++i) {
+		int ret = send(threads_[i].pipefd_[0], &message, sizeof(message), 0);
+		assert(ret == sizeof(message));
+	}
+
+	initial_timer_ = time(NULL);
+
+	std::cout<<"game start!\n";
 }
 
 
